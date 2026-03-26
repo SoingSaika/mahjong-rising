@@ -14,241 +14,135 @@ using MahjongRising.code.Player.States;
 namespace MahjongRising.code.Session;
 
 /// <summary>
-/// 一局游戏的会话管理。
-/// 由 RoomManager 创建，拥有 GameState、RuleEngine、RpcManager、AI 玩家。
-///
-/// 生命周期：
-///   RoomManager.CreateRoom(config)
-///     → new GameSession(config, bootstrap)
-///     → session.AddHumanPlayer(peerId, seat)  // 多人时多次调用
-///     → session.Start()                       // 配牌、庄家摸牌
-///     → ...（游戏进行中）...
-///     → session.Dispose()                     // 结束，清理资源
+/// 一局游戏会话。
+/// 服务端创建并管理 GameState + RPC + AI。
+/// 客户端通过 RpcManager 的事件接收通知。
 /// </summary>
 public partial class GameSession : Node
 {
-    private readonly RoomConfig _config;
-    private readonly GameBootstrap _bootstrap;
-
-    // ── 核心状态 ──
+    public RoomConfig Config { get; init; } = null!;
     public MahjongGameState GameState { get; private set; } = null!;
     public MahjongRuleEngine Engine { get; private set; } = null!;
-    public PlayerActionRpcManager RpcManager { get; private set; } = null!;
+    public PlayerActionRpcManager Rpc { get; private set; } = null!;
 
-    // ── AI ──
+    private GameBootstrap _boot = null!;
     private readonly Dictionary<int, IAiPlayer> _aiPlayers = new();
     private AiPlayerAdapter? _aiAdapter;
 
-    // ── 回调（通知 UI 层） ──
-    [Signal] public delegate void RoundStartedEventHandler();
-    [Signal] public delegate void RoundEndedEventHandler(string reason);
-    [Signal] public delegate void GameFinishedEventHandler();
-
-    public GameSession(RoomConfig config, GameBootstrap bootstrap)
-    {
-        _config = config;
-        _bootstrap = bootstrap;
-    }
+    [Signal] public delegate void GameStartedEventHandler();
+    [Signal] public delegate void GameEndedEventHandler();
 
     public override void _Ready()
     {
-        BuildEngine();
-        BuildGameState();
-        BuildRpcManager();
-        BuildAiPlayers();
-    }
-
-    // ═══════════════════════════════════
-    // 构建
-    // ═══════════════════════════════════
-
-    private void BuildEngine()
-    {
-        Engine = new MahjongRuleEngine(
-            _bootstrap.ActionHandlers,
-            new DefaultActionPriorityResolver(),
-            _bootstrap.Validators);
-    }
-
-    private void BuildGameState()
-    {
+        _boot = GetNode<GameBootstrap>("/root/GameBootstrap");
+        Engine = new MahjongRuleEngine(_boot.ActionHandlers, new DefaultActionPriorityResolver(), _boot.Validators);
         GameState = new MahjongGameState();
+        Rpc = new PlayerActionRpcManager();
+        AddChild(Rpc);
+    }
 
-        for (int i = 0; i < _config.PlayerCount; i++)
+    /// <summary>设置人类玩家座位。</summary>
+    public void SetHumanPlayer(int seat, long peerId)
+    {
+        EnsurePlayerExists(seat);
+        GameState.GetPlayer(seat).PeerId = peerId;
+        _aiPlayers.Remove(seat);
+    }
+
+    /// <summary>设置 AI 玩家座位。</summary>
+    public void SetAiPlayer(int seat, string difficulty = "normal")
+    {
+        EnsurePlayerExists(seat);
+        var ai = difficulty switch
         {
-            var player = new PlayerState(i)
-            {
-                SeatWind = i,
-                Score = 25000
-            };
-            GameState.Players.Add(player);
+            "easy" => new BasicAiPlayer(seat, AiStyle.Defensive),
+            "hard" => new BasicAiPlayer(seat, AiStyle.Aggressive),
+            _ => new BasicAiPlayer(seat, AiStyle.Balanced)
+        };
+        _aiPlayers[seat] = ai;
+        GameState.GetPlayer(seat).PeerId = AiPlayerAdapter.AiPeerBase + seat;
+    }
+
+    /// <summary>移除某座位的 AI。</summary>
+    public void RemoveAi(int seat) { _aiPlayers.Remove(seat); }
+
+    public bool IsAiSeat(int seat) => _aiPlayers.ContainsKey(seat);
+
+    /// <summary>开始游戏。</summary>
+    public void StartGame()
+    {
+        // 确保所有座位都有人
+        for (int i = 0; i < Config.PlayerCount; i++)
+        {
+            EnsurePlayerExists(i);
+            var p = GameState.GetPlayer(i);
+            p.SeatWind = i;
+            if (p.PeerId == 0 && !_aiPlayers.ContainsKey(i))
+                SetAiPlayer(i, Config.AiDifficulty);
         }
 
         GameState.DealerSeat = 0;
         GameState.RoundWind = 0;
-        GameState.ReactionWindow.TimeoutSeconds = _config.ReactionTimeoutSeconds;
-    }
+        GameState.ReactionWindow.TimeoutSeconds = Config.ReactionTimeoutSeconds;
 
-    private void BuildRpcManager()
-    {
-        RpcManager = new PlayerActionRpcManager();
-        AddChild(RpcManager);
-        // Initialize 在 Start() 中调用，因为需要先分配 PeerId
-    }
-
-    private void BuildAiPlayers()
-    {
-        _aiAdapter = new AiPlayerAdapter(this);
-        AddChild(_aiAdapter);
-
-        // 确定哪些座位是 AI
-        var humanSeats = GameState.Players
-            .Where(p => p.PeerId > 0)
-            .Select(p => p.Seat)
-            .ToHashSet();
-
-        for (int i = 0; i < _config.PlayerCount; i++)
-        {
-            if (humanSeats.Contains(i)) continue;
-
-            IAiPlayer ai = _config.AiDifficulty switch
-            {
-                "easy" => new BasicAiPlayer(i, AiStyle.Defensive),
-                "hard" => new BasicAiPlayer(i, AiStyle.Aggressive),
-                _ => new BasicAiPlayer(i, AiStyle.Balanced)
-            };
-
-            _aiPlayers[i] = ai;
-            GameState.GetPlayer(i).PeerId = AiPlayerAdapter.AiPeerBase + i;
-        }
-    }
-
-    // ═══════════════════════════════════
-    // 人类玩家管理
-    // ═══════════════════════════════════
-
-    /// <summary>添加一个人类玩家。多人模式下，每个连接的 peer 调用一次。</summary>
-    public void AddHumanPlayer(long peerId, int seat, string characterId = "")
-    {
-        var player = GameState.GetPlayer(seat);
-        player.PeerId = peerId;
-
-        // 移除该座位的 AI（如果有）
-        _aiPlayers.Remove(seat);
-    }
-
-    /// <summary>单人模式：本地玩家总是 seat 0。</summary>
-    public void AddLocalPlayer(string characterId = "")
-    {
-        // 单人模式时 PeerId = 1（Godot 本地服务器的 unique ID）
-        AddHumanPlayer(1, 0, characterId);
-    }
-
-    // ═══════════════════════════════════
-    // 开始 / 结束
-    // ═══════════════════════════════════
-
-    /// <summary>开始游戏。配牌 → 庄家摸牌。</summary>
-    public void Start()
-    {
-        // 洗牌
         ShuffleAndDeal();
+        Rpc.Initialize(GameState, Engine);
 
-        // 初始化 RPC（绑定 seat → peerId）
-        RpcManager.Initialize(GameState, Engine);
+        // AI 适配器
+        if (_aiPlayers.Count > 0)
+        {
+            _aiAdapter = new AiPlayerAdapter(this, _aiPlayers, Rpc, GameState, Engine);
+            AddChild(_aiAdapter);
+        }
 
-        // 通知 AI 适配器就绪
-        _aiAdapter?.Initialize(_aiPlayers, RpcManager, GameState, Engine);
-
-        // 开局
-        RpcManager.ServerStartRound();
-        EmitSignal(SignalName.RoundStarted);
-
-        GD.Print($"[Session] 游戏开始：{_config.PlayerCount} 人，{_aiPlayers.Count} AI");
+        Rpc.ServerStartRound();
+        EmitSignal(SignalName.GameStarted);
     }
 
-    /// <summary>洗牌配牌。</summary>
     private void ShuffleAndDeal()
     {
-        // 生成完整牌组
-        var allTiles = _bootstrap.Tiles.CreateFullSet();
-        var rng = new Random();
+        var allTiles = _boot.Tiles.CreateFullSet();
+        // var rng = new Random();
+        // for (int i = allTiles.Count - 1; i > 0; i--) { int j = rng.Next(i + 1); (allTiles[i], allTiles[j]) = (allTiles[j], allTiles[i]); }
 
-        // 洗牌（Fisher-Yates）
-        for (int i = allTiles.Count - 1; i > 0; i--)
-        {
-            int j = rng.Next(i + 1);
-            (allTiles[i], allTiles[j]) = (allTiles[j], allTiles[i]);
-        }
-
-        // 转为 TileState
-        var tileStates = allTiles.Select(t => new MahjongTileState(t)).ToList();
-
-        // 分配：14 张王牌 → DeadWall，每人 13 张 → Hand，剩余 → Wall
+        var states = allTiles.Select(t => new MahjongTileState(t)).ToList();
         int idx = 0;
 
-        // 配牌（每人 13 张）
         for (int round = 0; round < 13; round++)
-        {
-            for (int seat = 0; seat < _config.PlayerCount; seat++)
+            for (int seat = 0; seat < Config.PlayerCount; seat++)
             {
-                var ts = tileStates[idx++];
-                ts.Zone = MahjongTileZone.Hand;
-                ts.OwnerSeat = seat;
+                var ts = states[idx++]; ts.Zone = MahjongTileZone.Hand; ts.OwnerSeat = seat;
                 GameState.GetPlayer(seat).Hand.Add(ts);
             }
-        }
 
-        // 王牌区（14 张）
-        for (int i = 0; i < 14 && idx < tileStates.Count; i++)
+        for (int i = 0; i < 14 && idx < states.Count; i++)
         {
-            var ts = tileStates[idx++];
-            ts.Zone = MahjongTileZone.DeadWall;
-            GameState.DeadWall.Add(ts);
+            var ts = states[idx++]; ts.Zone = MahjongTileZone.DeadWall; GameState.DeadWall.Add(ts);
         }
 
-        // 翻开第一张宝牌指示牌
         if (GameState.DeadWall.Count > 0)
         {
-            var doraIndicator = GameState.DeadWall.Last();
-            GameState.DeadWall.Remove(doraIndicator);
-            doraIndicator.Zone = MahjongTileZone.Reveal;
-            doraIndicator.IsFaceUp = true;
-            GameState.RevealedTiles.Add(doraIndicator);
+            var dora = GameState.DeadWall.Last(); GameState.DeadWall.Remove(dora);
+            dora.Zone = MahjongTileZone.Reveal; dora.IsFaceUp = true; GameState.RevealedTiles.Add(dora);
         }
 
-        // 剩余 → 牌山
-        while (idx < tileStates.Count)
-        {
-            var ts = tileStates[idx++];
-            ts.Zone = MahjongTileZone.Wall;
-            GameState.Wall.Add(ts);
-        }
+        while (idx < states.Count) { var ts = states[idx++]; ts.Zone = MahjongTileZone.Wall; GameState.Wall.Add(ts); }
     }
 
-    /// <summary>结束会话，清理资源。</summary>
-    public void Finish()
+    private void EnsurePlayerExists(int seat)
     {
-        EmitSignal(SignalName.GameFinished);
-        QueueFree();
+        while (GameState.Players.Count <= seat)
+            GameState.Players.Add(new PlayerState(GameState.Players.Count) { Score = 25000 });
     }
 
     public override void _Process(double delta)
     {
-        // 反应窗口超时
-        if (Multiplayer.IsServer() || _config.Mode == "solo")
+        if (Multiplayer.IsServer() || Config.Mode == "solo")
         {
-            RpcManager?.CheckReactionTimeout();
+            Rpc?.CheckReactionTimeout();
+            _aiAdapter?.Process(delta);
         }
-
-        // AI 思考
-        _aiAdapter?.Process(delta);
     }
 
-    // ═══════════════════════════════════
-    // AI 查询入口（AiPlayerAdapter 调用）
-    // ═══════════════════════════════════
-
-    internal bool IsAiSeat(int seat) => _aiPlayers.ContainsKey(seat);
-    internal IAiPlayer? GetAi(int seat) => _aiPlayers.GetValueOrDefault(seat);
+    public void EndGame() { EmitSignal(SignalName.GameEnded); QueueFree(); }
 }

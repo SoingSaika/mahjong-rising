@@ -1,0 +1,8 @@
+[gd_scene format=3 uid="uid://b8v4njulgqpvy"]
+
+[ext_resource type="Script" uid="uid://cmb00ycqcqjfo" path="res://code/UI/RoomLobbyUI.cs" id="1_4v7jv"]
+
+[node name="RoomLobby" type="Control" unique_id=1020262767]
+layout_mode = 3
+anchors_preset = 0
+script = ExtResource("1_4v7jv")

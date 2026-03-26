@@ -11,13 +11,15 @@ config_version=5
 [application]
 
 config/name="MahjongRising"
-run/main_scene="uid://f0biq3oj1hnn"
+run/main_scene="uid://df0g4fd8n4by0"
 config/features=PackedStringArray("4.6", "C#", "Forward Plus")
 config/icon="res://icon.svg"
 
 [autoload]
 
 GameBootstrap="*uid://chs7b1hven6da"
+NetworkManager="*uid://dcjw3ehmfkn8l"
+RoomManager="*uid://cugu2pfl1q1fd"
 
 [display]
 
