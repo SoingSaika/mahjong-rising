@@ -1,152 +1,160 @@
 using Godot;
+using MahjongRising.code.Game.Rpc;
 using MahjongRising.code.Session;
 
 namespace MahjongRising.code.UI;
 
-/// <summary>
-/// 房间大厅 UI。显示 4 个座位槽，可添加/移除 AI，点击开始。
-/// </summary>
 public partial class RoomLobbyUI : Control
 {
-    private Label[] _slotLabels = new Label[4];
-    private Button[] _aiButtons = new Button[4];
-    private Button _startBtn = null!;
-    private Label _statusLabel = null!;
+	private Label[] _slotLabels = new Label[4];
+	private Button[] _aiButtons = new Button[4];
+	private Button _startBtn = null!;
+	private Label _statusLabel = null!;
+	private bool _isHost;
 
-    public override void _Ready()
-    {
-        var root = new VBoxContainer();
-        root.SetAnchorsPreset(LayoutPreset.FullRect);
-        root.AddThemeConstantOverride("separation", 12);
-        var margin = new MarginContainer();
-        margin.SetAnchorsPreset(LayoutPreset.FullRect);
-        margin.AddThemeConstantOverride("margin_left", 40);
-        margin.AddThemeConstantOverride("margin_right", 40);
-        margin.AddThemeConstantOverride("margin_top", 40);
-        margin.AddThemeConstantOverride("margin_bottom", 40);
-        margin.AddChild(root);
-        AddChild(margin);
+	public override void _Ready()
+	{
+		_isHost = RoomManager.Instance.IsHost;
 
-        var title = new Label { Text = "房间大厅", HorizontalAlignment = HorizontalAlignment.Center };
-        title.AddThemeFontSizeOverride("font_size", 32);
-        root.AddChild(title);
-        root.AddChild(new HSeparator());
+		var margin = new MarginContainer();
+		margin.SetAnchorsPreset(LayoutPreset.FullRect);
+		foreach (var s in new[] { "margin_left", "margin_right", "margin_top", "margin_bottom" })
+			margin.AddThemeConstantOverride(s, 40);
+		AddChild(margin);
 
-        var session = RoomManager.Instance.CurrentSession;
+		var root = new VBoxContainer();
+		root.AddThemeConstantOverride("separation", 12);
+		margin.AddChild(root);
 
-        // 4 个座位
-        for (int i = 0; i < 4; i++)
-        {
-            var row = new HBoxContainer();
-            row.AddThemeConstantOverride("separation", 12);
+		var title = new Label { Text = _isHost ? "房间大厅 (房主)" : "房间大厅 (等待中)", HorizontalAlignment = HorizontalAlignment.Center };
+		title.AddThemeFontSizeOverride("font_size", 32);
+		root.AddChild(title);
+		root.AddChild(new HSeparator());
 
-            _slotLabels[i] = new Label { CustomMinimumSize = new Vector2(300, 0) };
-            row.AddChild(_slotLabels[i]);
+		for (int i = 0; i < 4; i++)
+		{
+			var row = new HBoxContainer();
+			row.AddThemeConstantOverride("separation", 12);
+			_slotLabels[i] = new Label { CustomMinimumSize = new Vector2(300, 0) };
+			row.AddChild(_slotLabels[i]);
+			int seat = i;
+			_aiButtons[i] = new Button { CustomMinimumSize = new Vector2(120, 40) };
+			_aiButtons[i].Pressed += () => ToggleAi(seat);
+			_aiButtons[i].Visible = _isHost;
+			row.AddChild(_aiButtons[i]);
+			root.AddChild(row);
+		}
 
-            int seat = i;
-            _aiButtons[i] = new Button { CustomMinimumSize = new Vector2(120, 40) };
-            _aiButtons[i].Pressed += () => ToggleAi(seat);
-            row.AddChild(_aiButtons[i]);
+		root.AddChild(new HSeparator());
+		_statusLabel = new Label { Text = _isHost ? "等待开始..." : "等待房主开始游戏..." };
+		root.AddChild(_statusLabel);
 
-            root.AddChild(row);
-        }
+		var btnRow = new HBoxContainer();
+		btnRow.AddThemeConstantOverride("separation", 16);
 
-        root.AddChild(new HSeparator());
+		_startBtn = new Button { Text = "开始游戏", CustomMinimumSize = new Vector2(200, 50), Visible = _isHost };
+		_startBtn.Pressed += OnStartPressed;
+		btnRow.AddChild(_startBtn);
 
-        _statusLabel = new Label { Text = "等待开始..." };
-        root.AddChild(_statusLabel);
+		var backBtn = new Button { Text = "返回", CustomMinimumSize = new Vector2(120, 50) };
+		backBtn.Pressed += () => { RoomManager.Instance.LeaveRoom(); GetTree().ChangeSceneToFile("res://scenes/MainMenu.tscn"); };
+		btnRow.AddChild(backBtn);
+		root.AddChild(btnRow);
 
-        var btnRow = new HBoxContainer();
-        btnRow.AddThemeConstantOverride("separation", 16);
+		// 客户端：监听 GameInit 事件，收到说明游戏开始了
+		if (!_isHost)
+		{
+			var session = RoomManager.Instance.CurrentSession;
+			if (session?.Rpc != null)
+				session.Rpc.OnGameInit += OnClientReceiveGameInit;
+		}
 
-        _startBtn = new Button { Text = "开始游戏", CustomMinimumSize = new Vector2(200, 50) };
-        _startBtn.Pressed += OnStartPressed;
-        btnRow.AddChild(_startBtn);
+		// 监听 peer 变化（房主端）
+		if (_isHost)
+			NetworkManager.Instance.PeerConnected += OnPeerJoined;
 
-        var backBtn = new Button { Text = "返回", CustomMinimumSize = new Vector2(120, 50) };
-        backBtn.Pressed += () => { RoomManager.Instance.LeaveRoom(); GetTree().ChangeSceneToFile("res://scenes/MainMenu.tscn"); };
-        btnRow.AddChild(backBtn);
+		UpdateSlots();
+	}
 
-        root.AddChild(btnRow);
+	private void OnPeerJoined(long peerId)
+	{
+		// RoomManager.OnPeerConnected 已经分配了座位，只需刷新 UI
+		CallDeferred(nameof(UpdateSlots));
+	}
 
-        UpdateSlots();
-    }
+	private void OnClientReceiveGameInit(GameInitEventDto e)
+	{
+		// 客户端收到 GameInit = 游戏开始了
+		RoomManager.Instance.MySeat = e.MySeat;
 
-    private void ToggleAi(int seat)
-    {
-        var session = RoomManager.Instance.CurrentSession;
-        if (session == null) return;
+		// 缓存初始数据（GameBoardUI 启动时读取）
+		RoomManager.Instance.CurrentSession!.CachedInitData = e;
 
-        // seat 0 是房主/本机玩家，不能改
-        if (seat == 0) return;
+		// 取消订阅
+		var session = RoomManager.Instance.CurrentSession;
+		if (session?.Rpc != null)
+			session.Rpc.OnGameInit -= OnClientReceiveGameInit;
 
-        if (session.IsAiSeat(seat))
-            session.RemoveAi(seat);
-        else
-            session.SetAiPlayer(seat, RoomManager.Instance.CurrentConfig?.AiDifficulty ?? "normal");
+		// 切换到游戏场景
+		GetTree().ChangeSceneToFile("res://scenes/GameBoard.tscn");
+	}
 
-        UpdateSlots();
-    }
+	private void ToggleAi(int seat)
+	{
+		if (!_isHost || seat == 0) return;
+		var session = RoomManager.Instance.CurrentSession;
+		if (session == null) return;
+		if (session.IsAiSeat(seat)) session.RemoveAi(seat);
+		else session.SetAiPlayer(seat, RoomManager.Instance.CurrentConfig?.AiDifficulty ?? "normal");
+		UpdateSlots();
+	}
 
-    private void UpdateSlots()
-    {
-        var session = RoomManager.Instance.CurrentSession;
-        if (session == null) return;
+	private void UpdateSlots()
+	{
+		var session = RoomManager.Instance.CurrentSession;
+		if (session == null) return;
+		string[] winds = { "东", "南", "西", "北" };
 
-        for (int i = 0; i < 4; i++)
-        {
-            bool isHuman = !session.IsAiSeat(i) && session.GameState.Players.Count > i && session.GameState.Players[i].PeerId > 0 && session.GameState.Players[i].PeerId < AiPlayerAdapter_PeerBase;
-            bool isAi = session.IsAiSeat(i);
-            bool isEmpty = !isHuman && !isAi;
+		for (int i = 0; i < 4; i++)
+		{
+			bool hasPlayer = session.GameState.Players.Count > i;
+			bool isAi = session.IsAiSeat(i);
+			bool isHuman = hasPlayer && !isAi && session.GameState.Players[i].PeerId > 0 && session.GameState.Players[i].PeerId < 100000;
 
-            string wind = i switch { 0 => "东", 1 => "南", 2 => "西", _ => "北" };
+			string w = i < winds.Length ? winds[i] : "?";
+			if (i == 0 && _isHost) _slotLabels[i].Text = $"座位 {i} ({w}): 你 [房主]";
+			else if (isAi) _slotLabels[i].Text = $"座位 {i} ({w}): AI";
+			else if (isHuman) _slotLabels[i].Text = $"座位 {i} ({w}): 玩家 (已连接)";
+			else _slotLabels[i].Text = $"座位 {i} ({w}): 空位";
 
-            if (i == 0)
-            {
-                _slotLabels[i].Text = $"座位 {i} ({wind}): 你 [房主]";
-                _aiButtons[i].Text = "—";
-                _aiButtons[i].Disabled = true;
-            }
-            else if (isAi)
-            {
-                _slotLabels[i].Text = $"座位 {i} ({wind}): AI ({RoomManager.Instance.CurrentConfig?.AiDifficulty ?? "normal"})";
-                _aiButtons[i].Text = "移除 AI";
-                _aiButtons[i].Disabled = false;
-            }
-            else if (isHuman)
-            {
-                _slotLabels[i].Text = $"座位 {i} ({wind}): 玩家 (已连接)";
-                _aiButtons[i].Text = "—";
-                _aiButtons[i].Disabled = true;
-            }
-            else
-            {
-                _slotLabels[i].Text = $"座位 {i} ({wind}): 空位";
-                _aiButtons[i].Text = "添加 AI";
-                _aiButtons[i].Disabled = false;
-            }
-        }
-    }
+			if (_isHost && i > 0)
+			{
+				_aiButtons[i].Text = isAi ? "移除AI" : "添加AI";
+				_aiButtons[i].Disabled = isHuman;
+			}
+		}
+	}
 
-    private void OnStartPressed()
-    {
-        var session = RoomManager.Instance.CurrentSession;
-        if (session == null) return;
+	private void OnStartPressed()
+	{
+		var session = RoomManager.Instance.CurrentSession;
+		if (session == null) return;
 
-        // 空位自动补 AI
-        for (int i = 0; i < 4; i++)
-        {
-            if (!session.IsAiSeat(i) && (session.GameState.Players.Count <= i || session.GameState.Players[i].PeerId == 0))
-                session.SetAiPlayer(i, RoomManager.Instance.CurrentConfig?.AiDifficulty ?? "normal");
-        }
+		// 空位补 AI
+		for (int i = 0; i < 4; i++)
+			if (!session.IsAiSeat(i) && (session.GameState.Players.Count <= i || session.GameState.Players[i].PeerId == 0))
+				session.SetAiPlayer(i, RoomManager.Instance.CurrentConfig?.AiDifficulty ?? "normal");
 
-        _statusLabel.Text = "正在启动...";
-        _startBtn.Disabled = true;
+		_startBtn.Disabled = true;
+		_statusLabel.Text = "正在启动...";
 
-        // 切换到游戏场景（游戏在 GameBoardUI._Ready 中启动）
-        GetTree().ChangeSceneToFile("res://scenes/game_board.tscn");
-    }
+		// 切换到游戏场景（GameBoardUI._Ready 中调 StartGame）
+		GetTree().ChangeSceneToFile("res://scenes/GameBoard.tscn");
+	}
 
-    // AiPlayerAdapter.AiPeerBase 的值
-    private const long AiPlayerAdapter_PeerBase = 100000;
+	public override void _ExitTree()
+	{
+		if (_isHost)
+			NetworkManager.Instance.PeerConnected -= OnPeerJoined;
+	}
 }

@@ -2,70 +2,77 @@ using Godot;
 
 namespace MahjongRising.code.Session;
 
-/// <summary>
-/// 房间管理器。处理开房/加入/开始，管理场景切换。
-/// 挂载为 AutoLoad。
-/// </summary>
 public partial class RoomManager : Node
 {
     public static RoomManager Instance { get; private set; } = null!;
     public GameSession? CurrentSession { get; private set; }
     public RoomConfig? CurrentConfig { get; set; }
+    public bool IsHost { get; private set; }
+    public int MySeat { get; set; } = -1;
 
-    public override void _Ready() { Instance = this; }
+    public override void _Ready()
+    {
+        Instance = this;
+        NetworkManager.Instance.PeerConnected += OnPeerConnected;
+    }
 
-    /// <summary>单人模式。</summary>
     public GameSession CreateSoloRoom(RoomConfig config)
     {
         NetworkManager.Instance.HostSolo();
-        CurrentConfig = config;
-        var session = CreateSession(config);
-        session.SetHumanPlayer(0, 1); // 本地玩家 seat=0, peerId=1
-        return session;
+        CurrentConfig = config; IsHost = true; MySeat = 0;
+        var s = MakeSession(config); s.SetHumanPlayer(0, 1); return s;
     }
 
-    /// <summary>多人 - 开房。房主是 peerId=1。</summary>
     public GameSession CreateHostRoom(RoomConfig config, int port = 7777)
     {
         var err = NetworkManager.Instance.HostGame(port, config.PlayerCount);
         if (err != Error.Ok) return null!;
-        CurrentConfig = config;
-        var session = CreateSession(config);
-        session.SetHumanPlayer(0, 1); // 房主 seat=0, peerId=1
-        return session;
+        CurrentConfig = config; IsHost = true; MySeat = 0;
+        var s = MakeSession(config); s.SetHumanPlayer(0, 1); return s;
     }
 
-    /// <summary>多人 - 加入他人房间。</summary>
     public Error JoinRoom(string addr, int port = 7777)
     {
-        return NetworkManager.Instance.JoinGame(addr, port);
+        var err = NetworkManager.Instance.JoinGame(addr, port);
+        if (err != Error.Ok) return err;
+        CurrentConfig = new RoomConfig { Mode = "join", PlayerCount = 4 };
+        IsHost = false; MySeat = -1;
+        MakeSession(CurrentConfig);
+        return Error.Ok;
     }
 
-    private GameSession CreateSession(RoomConfig config)
+    public void AddAi(int seat, string diff = "normal") => CurrentSession?.SetAiPlayer(seat, diff);
+    public void RemoveAi(int seat) => CurrentSession?.RemoveAi(seat);
+    public void StartGame() { if (IsHost) CurrentSession?.StartGame(); }
+
+    private void OnPeerConnected(long peerId)
+    {
+        if (!IsHost || CurrentSession == null) return;
+        for (int i = 1; i < (CurrentConfig?.PlayerCount ?? 4); i++)
+        {
+            var gs = CurrentSession.GameState;
+            if (gs.Players.Count <= i) continue;
+            var p = gs.Players[i];
+            if (p.PeerId > 0 && p.PeerId < 100000) continue;
+            CurrentSession.SetHumanPlayer(i, peerId);
+            GD.Print($"[Room] Peer {peerId} -> Seat {i}");
+            return;
+        }
+    }
+
+    private GameSession MakeSession(RoomConfig config)
     {
         CurrentSession?.EndGame();
-        var session = new GameSession { Config = config };
-        AddChild(session);
-        CurrentSession = session;
-        return session;
-    }
-
-    /// <summary>向当前房间添加 AI。</summary>
-    public void AddAi(int seat, string difficulty = "normal")
-    {
-        CurrentSession?.SetAiPlayer(seat, difficulty);
-    }
-
-    /// <summary>开始当前房间的游戏。切换到游戏场景。</summary>
-    public void StartGame()
-    {
-        CurrentSession?.StartGame();
+        var s = new GameSession { Config = config };
+        s.Name = "GameSession";
+        AddChild(s);
+        CurrentSession = s;
+        return s;
     }
 
     public void LeaveRoom()
     {
-        CurrentSession?.EndGame();
-        CurrentSession = null;
-        NetworkManager.Instance.Disconnect();
+        CurrentSession?.EndGame(); CurrentSession = null;
+        IsHost = false; MySeat = -1; NetworkManager.Instance.Disconnect();
     }
 }

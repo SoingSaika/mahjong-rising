@@ -33,7 +33,13 @@ public partial class AiPlayerAdapter : Node
         if (_queue.Count > 0)
         {
             _timer -= delta;
-            if (_timer <= 0) { var (_, act) = _queue.Dequeue(); act(); _timer = 0; }
+            if (_timer <= 0)
+            {
+                var (_, act) = _queue.Dequeue();
+                act();
+                // 给下一个排队项设置独立延迟
+                _timer = _queue.Count > 0 ? _queue.Peek().delay : 0;
+            }
             return;
         }
         CheckDecisions();

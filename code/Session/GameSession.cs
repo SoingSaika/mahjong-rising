@@ -32,6 +32,9 @@ public partial class GameSession : Node
     [Signal] public delegate void GameStartedEventHandler();
     [Signal] public delegate void GameEndedEventHandler();
 
+    /// <summary>客户端缓存的初始化数据（RoomLobby 收到后存入，GameBoardUI 读取）。</summary>
+    public Game.Rpc.GameInitEventDto? CachedInitData { get; set; }
+
     public override void _Ready()
     {
         _boot = GetNode<GameBootstrap>("/root/GameBootstrap");
@@ -86,7 +89,7 @@ public partial class GameSession : Node
         GameState.ReactionWindow.TimeoutSeconds = Config.ReactionTimeoutSeconds;
 
         ShuffleAndDeal();
-        Rpc.Initialize(GameState, Engine);
+        Rpc.Initialize(GameState, Engine, _boot.YakuRules, _boot.Scoring);
 
         // AI 适配器
         if (_aiPlayers.Count > 0)
@@ -102,8 +105,8 @@ public partial class GameSession : Node
     private void ShuffleAndDeal()
     {
         var allTiles = _boot.Tiles.CreateFullSet();
-        // var rng = new Random();
-        // for (int i = allTiles.Count - 1; i > 0; i--) { int j = rng.Next(i + 1); (allTiles[i], allTiles[j]) = (allTiles[j], allTiles[i]); }
+        var rng = new Random();
+        for (int i = allTiles.Count - 1; i > 0; i--) { int j = rng.Next(i + 1); (allTiles[i], allTiles[j]) = (allTiles[j], allTiles[i]); }
 
         var states = allTiles.Select(t => new MahjongTileState(t)).ToList();
         int idx = 0;

@@ -136,6 +136,12 @@ public class ReactionResultEventDto
     public string ActionType { get; set; } = "";
     public string OptionId { get; set; } = "";
     public MeldDto? NewMeld { get; set; }
+    /// <summary>从赢家手牌中移除的牌 ID 列表（客户端同步手牌用）。</summary>
+    public List<string> RemovedTileIds { get; set; } = new();
+    /// <summary>来源座位（被吃/碰的牌的原主人）。</summary>
+    public int SourceSeat { get; set; } = -1;
+    /// <summary>来源牌 ID（从弃牌区移走的那张）。</summary>
+    public string SourceTileId { get; set; } = "";
 }
 
 /// <summary>回合开始。全员广播。</summary>
@@ -170,6 +176,8 @@ public class RoundEndEventDto
     public int? WinnerSeat { get; set; }
     public int? LoserSeat { get; set; }             // 放铳者（ron 时）
     public List<string> YakuIds { get; set; } = new();
+    /// <summary>役名列表（日文显示名，与 YakuIds 一一对应）。</summary>
+    public List<string> YakuNames { get; set; } = new();
     public int TotalHan { get; set; }
     public int Fu { get; set; }
     public int BasePoints { get; set; }

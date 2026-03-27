@@ -45,7 +45,7 @@ public partial class GameBoardUI : Control
     private void SubscribeRpc()
     {
         var session = RoomManager.Instance?.CurrentSession;
-        if (session == null) { _statusLabel.Text = "等待服务器..."; return; }
+        if (session == null) { _statusLabel.Text = "错误：无会话"; return; }
 
         _rpc = session.Rpc;
         _rpc.OnGameInit += HandleGameInit;
@@ -56,17 +56,28 @@ public partial class GameBoardUI : Control
         _rpc.OnReactionResult += HandleReactionResult;
         _rpc.OnDoraReveal += HandleDoraReveal;
         _rpc.OnTurnStart += HandleTurnStart;
-        _rpc.OnPhaseChange += HandlePhaseChange;
         _rpc.OnSelfActions += HandleSelfActions;
         _rpc.OnRoundEnd += HandleRoundEnd;
         _rpc.OnError += HandleError;
 
-        _statusLabel.Text = "已连接，等待开局...";
-
-        // 服务端（房主或单人）：订阅完成后开始游戏
-        if (Multiplayer.IsServer() && session.GameState.Phase == Game.Rules.TurnPhase.RoundStart)
+        if (RoomManager.Instance.IsHost)
         {
+            // 房主/单人：启动游戏（会发 GameInit 给所有人）
+            _statusLabel.Text = "正在启动...";
             RoomManager.Instance.StartGame();
+        }
+        else
+        {
+            // 客户端：如果 RoomLobby 已缓存了 GameInit 数据，直接回放
+            if (session.CachedInitData != null)
+            {
+                HandleGameInit(session.CachedInitData);
+                session.CachedInitData = null;
+            }
+            else
+            {
+                _statusLabel.Text = "等待服务器初始化...";
+            }
         }
     }
 
@@ -136,7 +147,7 @@ public partial class GameBoardUI : Control
 
         // 7. 退出按钮
         var exitBtn = new Button { Text = "退出对局", CustomMinimumSize = new Vector2(120, 36) };
-        exitBtn.Pressed += () => { RoomManager.Instance.LeaveRoom(); GetTree().ChangeSceneToFile("res://scenes/main_menu.tscn"); };
+        exitBtn.Pressed += () => { RoomManager.Instance.LeaveRoom(); GetTree().ChangeSceneToFile("res://scenes/MainMenu.tscn"); };
         root.AddChild(exitBtn);
     }
 
@@ -168,6 +179,7 @@ public partial class GameBoardUI : Control
         if (e.Seat == _mySeat && e.Tile != null && e.Tile.TileCode != "hidden")
         {
             _myHand.Add(e.Tile);
+            _phase = "SelfActionPhase"; // 摸牌后 = 自摸动作/弃牌阶段
             RefreshHand();
         }
         if (_players[e.Seat] != null) _players[e.Seat]!.HandCount++;
@@ -177,10 +189,10 @@ public partial class GameBoardUI : Control
 
     private void HandleDiscard(DiscardEventDto e)
     {
-        // 如果是自己弃的牌，从手牌移除
         if (e.Seat == _mySeat)
         {
             _myHand.RemoveAll(t => t.InstanceId == e.Tile.InstanceId);
+            _phase = "ReactionPhase"; // 弃牌后进入反应阶段，不能再弃
             RefreshHand();
         }
         if (_players[e.Seat] != null)
@@ -212,6 +224,7 @@ public partial class GameBoardUI : Control
     {
         _pendingActions = e.AvailableActions;
         _isSelfActionPhase = true;
+        _phase = "SelfActionPhase"; // 可以选择自摸动作或直接弃牌
         ShowActionButtons(e.AvailableActions, "自摸动作可用！（或直接点手牌弃牌）");
     }
 
@@ -222,9 +235,26 @@ public partial class GameBoardUI : Control
         string actName = e.ActionType switch { "chi" => "吃", "peng" => "碰", "gang" => "杠", _ => e.ActionType };
         _statusLabel.Text = $"{name} {actName}！";
 
-        // 更新副露信息
+        // 副露信息
         if (_players[e.WinnerSeat] != null && e.NewMeld != null)
             _players[e.WinnerSeat]!.Melds.Add(e.NewMeld);
+
+        // 从来源玩家的弃牌河中移除被吃/碰的牌
+        if (e.SourceSeat >= 0 && !string.IsNullOrEmpty(e.SourceTileId) && _players[e.SourceSeat] != null)
+            _players[e.SourceSeat]!.Discards.RemoveAll(t => t.InstanceId == e.SourceTileId);
+
+        // 如果是自己的副露，从手牌中移除已用的牌
+        if (e.WinnerSeat == _mySeat && e.RemovedTileIds is { Count: > 0 })
+        {
+            var removeSet = new HashSet<string>(e.RemovedTileIds);
+            _myHand.RemoveAll(t => removeSet.Contains(t.InstanceId));
+            RefreshHand();
+        }
+
+        // 更新赢家的手牌数
+        if (_players[e.WinnerSeat] != null && e.RemovedTileIds != null)
+            _players[e.WinnerSeat]!.HandCount -= e.RemovedTileIds.Count;
+
         RefreshPlayers();
     }
 
@@ -237,11 +267,16 @@ public partial class GameBoardUI : Control
     private void HandleTurnStart(TurnStartEventDto e)
     {
         _currentSeat = e.Seat;
+        // 用服务端发来的实际阶段（DrawPhase / DiscardPhase）
+        _phase = !string.IsNullOrEmpty(e.Phase) ? e.Phase : "DrawPhase";
         HideActionButtons();
         _pendingActions = null;
         _isSelfActionPhase = false;
         if (e.Seat == _mySeat)
-            _statusLabel.Text = "你的回合";
+        {
+            string hint = _phase == "DiscardPhase" ? "你的回合，请弃牌" : "你的回合";
+            _statusLabel.Text = hint;
+        }
         else
             _statusLabel.Text = $"P{e.Seat} 的回合";
     }
@@ -266,9 +301,20 @@ public partial class GameBoardUI : Control
         {
             string winner = e.WinnerSeat == _mySeat ? "你" : $"P{e.WinnerSeat}";
             string type = e.Reason == "tsumo" ? "自摸" : "荣和";
-            string yakuStr = string.Join(", ", e.YakuIds ?? new());
-            _resultLabel.Text = $"{winner} {type}！ {e.TotalHan}番{e.Fu}符";
-            _statusLabel.Text = $"役: {yakuStr}";
+
+            if (e.TotalHan > 0)
+            {
+                string yakuStr = e.YakuNames is { Count: > 0 }
+                    ? string.Join(" ", e.YakuNames)
+                    : string.Join(" ", e.YakuIds ?? new());
+                _resultLabel.Text = $"{winner} {type}！ {e.TotalHan}番{e.Fu}符";
+                _statusLabel.Text = yakuStr;
+            }
+            else
+            {
+                _resultLabel.Text = $"{winner} {type}！";
+                _statusLabel.Text = "";
+            }
         }
 
         if (e.ScoreChanges != null)
@@ -476,7 +522,6 @@ public partial class GameBoardUI : Control
             _rpc.OnReactionResult -= HandleReactionResult;
             _rpc.OnDoraReveal -= HandleDoraReveal;
             _rpc.OnTurnStart -= HandleTurnStart;
-            _rpc.OnPhaseChange -= HandlePhaseChange;
             _rpc.OnSelfActions -= HandleSelfActions;
             _rpc.OnRoundEnd -= HandleRoundEnd;
             _rpc.OnError -= HandleError;
