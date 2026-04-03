@@ -1,8 +1,7 @@
 using System;
-using System.Collections.Generic;
-using MahjongRising.code.Game.Rpc;
 using MahjongRising.code.Game.State;
 using MahjongRising.code.Player.States;
+using MahjongRising.code.Session.Rpc;
 
 namespace MahjongRising.code.AI;
 

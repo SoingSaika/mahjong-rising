@@ -1,10 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using MahjongRising.code.Game.Rpc;
 using MahjongRising.code.Game.State;
 using MahjongRising.code.Mahjong.States;
 using MahjongRising.code.Player.States;
+using MahjongRising.code.Session.Rpc;
 using MahjongRising.code.Yaku;
 
 namespace MahjongRising.code.AI;

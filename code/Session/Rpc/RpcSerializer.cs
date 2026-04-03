@@ -1,5 +1,3 @@
-using System;
-using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
 using MahjongRising.code.Game.Rules;
@@ -7,7 +5,7 @@ using MahjongRising.code.Game.Rules.Validators;
 using MahjongRising.code.Mahjong.States;
 using MahjongRising.code.Player.States;
 
-namespace MahjongRising.code.Game.Rpc;
+namespace MahjongRising.code.Session.Rpc;
 
 /// <summary>
 /// RPC 序列化工具。

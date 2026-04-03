@@ -1,10 +1,11 @@
 using System.Collections.Generic;
 using System.Linq;
 using Godot;
-using MahjongRising.code.Game.Rpc;
 using MahjongRising.code.Game.Rules;
 using MahjongRising.code.Game.State;
 using MahjongRising.code.Session;
+using MahjongRising.code.Session.Rpc;
+using PlayerActionRpcManager = MahjongRising.code.Session.Rpc.PlayerActionRpcManager;
 
 namespace MahjongRising.code.AI;
 

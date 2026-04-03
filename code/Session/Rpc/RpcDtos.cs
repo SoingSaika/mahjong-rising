@@ -1,7 +1,6 @@
-using System;
 using System.Collections.Generic;
 
-namespace MahjongRising.code.Game.Rpc;
+namespace MahjongRising.code.Session.Rpc;
 
 // ══════════════════════════════════════════════════
 // 所有 RPC 传输用的 DTO（Data Transfer Object）

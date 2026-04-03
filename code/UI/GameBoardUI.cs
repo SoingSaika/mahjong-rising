@@ -1,8 +1,9 @@
 using System.Collections.Generic;
 using System.Linq;
 using Godot;
-using MahjongRising.code.Game.Rpc;
 using MahjongRising.code.Session;
+using MahjongRising.code.Session.Rpc;
+using PlayerActionRpcManager = MahjongRising.code.Session.Rpc.PlayerActionRpcManager;
 
 namespace MahjongRising.code.UI;
 
@@ -47,7 +48,7 @@ public partial class GameBoardUI : Control
         var session = RoomManager.Instance?.CurrentSession;
         if (session == null) { _statusLabel.Text = "错误：无会话"; return; }
 
-        _rpc = session.Rpc;
+        _rpc = session.GameRpc;
         _rpc.OnGameInit += HandleGameInit;
         _rpc.OnDraw += HandleDraw;
         _rpc.OnDiscard += HandleDiscard;
@@ -62,22 +63,12 @@ public partial class GameBoardUI : Control
 
         if (RoomManager.Instance.IsHost)
         {
-            // 房主/单人：启动游戏（会发 GameInit 给所有人）
-            _statusLabel.Text = "正在启动...";
-            RoomManager.Instance.StartGame();
+            _statusLabel.Text = "正在配牌...";
+            RoomManager.Instance.BeginGame();
         }
         else
         {
-            // 客户端：如果 RoomLobby 已缓存了 GameInit 数据，直接回放
-            if (session.CachedInitData != null)
-            {
-                HandleGameInit(session.CachedInitData);
-                session.CachedInitData = null;
-            }
-            else
-            {
-                _statusLabel.Text = "等待服务器初始化...";
-            }
+            _statusLabel.Text = "等待服务器配牌...";
         }
     }
 

@@ -4,26 +4,36 @@ using System.Linq;
 using Godot;
 using MahjongRising.code.AI;
 using MahjongRising.code.Game;
-using MahjongRising.code.Game.Rpc;
 using MahjongRising.code.Game.Rules;
 using MahjongRising.code.Game.State;
 using MahjongRising.code.Mahjong.States;
 using MahjongRising.code.Player.Actions;
 using MahjongRising.code.Player.States;
+using MahjongRising.code.Session.Rpc;
+using PlayerActionRpcManager = MahjongRising.code.Session.Rpc.PlayerActionRpcManager;
 
 namespace MahjongRising.code.Session;
 
 /// <summary>
-/// 一局游戏会话。
-/// 服务端创建并管理 GameState + RPC + AI。
-/// 客户端通过 RpcManager 的事件接收通知。
+/// 一局游戏会话。拥有两个 RPC 子节点：
+///   RoomRpcManager      — 房间生命周期（加入/离开/AI/角色/开始/结束）
+///   PlayerActionRpcManager — 游戏内操作（摸/弃/吃/碰/杠/胡）
+///
+/// 两端（host+client）节点树结构完全一致：
+///   RoomManager/GameSession/RoomRpc
+///   RoomManager/GameSession/GameRpc
 /// </summary>
 public partial class GameSession : Node
 {
     public RoomConfig Config { get; init; } = null!;
     public MahjongGameState GameState { get; private set; } = null!;
     public MahjongRuleEngine Engine { get; private set; } = null!;
-    public PlayerActionRpcManager Rpc { get; private set; } = null!;
+
+    /// <summary>房间 RPC（大厅阶段 + 游戏结束后）。</summary>
+    public Rpc.RoomRpcManager RoomRpc { get; private set; } = null!;
+
+    /// <summary>游戏内 RPC。</summary>
+    public PlayerActionRpcManager GameRpc { get; private set; } = null!;
 
     private GameBootstrap _boot = null!;
     private readonly Dictionary<int, IAiPlayer> _aiPlayers = new();
@@ -32,19 +42,23 @@ public partial class GameSession : Node
     [Signal] public delegate void GameStartedEventHandler();
     [Signal] public delegate void GameEndedEventHandler();
 
-    /// <summary>客户端缓存的初始化数据（RoomLobby 收到后存入，GameBoardUI 读取）。</summary>
-    public Game.Rpc.GameInitEventDto? CachedInitData { get; set; }
-
     public override void _Ready()
     {
         _boot = GetNode<GameBootstrap>("/root/GameBootstrap");
         Engine = new MahjongRuleEngine(_boot.ActionHandlers, new DefaultActionPriorityResolver(), _boot.Validators);
         GameState = new MahjongGameState();
-        Rpc = new PlayerActionRpcManager();
-        AddChild(Rpc);
+
+        // 创建两个 RPC 子节点（名称固定，保证两端路径一致）
+        RoomRpc = new Rpc.RoomRpcManager { Name = "RoomRpc" };
+        AddChild(RoomRpc);
+
+        GameRpc = new PlayerActionRpcManager { Name = "GameRpc" };
+        AddChild(GameRpc);
     }
 
-    /// <summary>设置人类玩家座位。</summary>
+    // ═══ 座位管理（通过 RoomRpcManager 驱动） ═══
+
+    /// <summary>服务端：设置人类玩家。</summary>
     public void SetHumanPlayer(int seat, long peerId)
     {
         EnsurePlayerExists(seat);
@@ -52,7 +66,7 @@ public partial class GameSession : Node
         _aiPlayers.Remove(seat);
     }
 
-    /// <summary>设置 AI 玩家座位。</summary>
+    /// <summary>服务端：设置 AI。</summary>
     public void SetAiPlayer(int seat, string difficulty = "normal")
     {
         EnsurePlayerExists(seat);
@@ -66,22 +80,45 @@ public partial class GameSession : Node
         GameState.GetPlayer(seat).PeerId = AiPlayerAdapter.AiPeerBase + seat;
     }
 
-    /// <summary>移除某座位的 AI。</summary>
-    public void RemoveAi(int seat) { _aiPlayers.Remove(seat); }
+    public void RemovePlayer(int seat)
+    {
+        if (seat <= 0 || seat >= GameState.Players.Count) return;
+        _aiPlayers.Remove(seat);
+        GameState.GetPlayer(seat).PeerId = 0;
+    }
 
     public bool IsAiSeat(int seat) => _aiPlayers.ContainsKey(seat);
 
-    /// <summary>开始游戏。</summary>
+    // ═══ 开始游戏 ═══
+
+    /// <summary>
+    /// 服务端调用。从 RoomRpcManager 读取最终座位状态，配牌开局。
+    /// </summary>
     public void StartGame()
     {
-        // 确保所有座位都有人
+        // 从 RoomRpc 同步座位到 GameState
         for (int i = 0; i < Config.PlayerCount; i++)
         {
             EnsurePlayerExists(i);
             var p = GameState.GetPlayer(i);
             p.SeatWind = i;
-            if (p.PeerId == 0 && !_aiPlayers.ContainsKey(i))
+
+            var status = RoomRpc.GetStatus(i);
+            if (status == SlotStatus.Human)
+            {
+                p.PeerId = RoomRpc.GetPeerId(i);
+                _aiPlayers.Remove(i);
+            }
+            else if (status == SlotStatus.Ai)
+            {
+                SetAiPlayer(i, RoomRpc.GetAiDifficulty(i));
+            }
+            else
+            {
+                // 空位补 AI
                 SetAiPlayer(i, Config.AiDifficulty);
+                RoomRpc.ServerSetAi(i, Config.AiDifficulty);
+            }
         }
 
         GameState.DealerSeat = 0;
@@ -89,16 +126,15 @@ public partial class GameSession : Node
         GameState.ReactionWindow.TimeoutSeconds = Config.ReactionTimeoutSeconds;
 
         ShuffleAndDeal();
-        Rpc.Initialize(GameState, Engine, _boot.YakuRules, _boot.Scoring);
+        GameRpc.Initialize(GameState, Engine, _boot.YakuRules, _boot.Scoring);
 
-        // AI 适配器
         if (_aiPlayers.Count > 0)
         {
-            _aiAdapter = new AiPlayerAdapter(this, _aiPlayers, Rpc, GameState, Engine);
+            _aiAdapter = new AiPlayerAdapter(this, _aiPlayers, GameRpc, GameState, Engine);
             AddChild(_aiAdapter);
         }
 
-        Rpc.ServerStartRound();
+        GameRpc.ServerStartRound();
         EmitSignal(SignalName.GameStarted);
     }
 
@@ -142,7 +178,7 @@ public partial class GameSession : Node
     {
         if (Multiplayer.IsServer() || Config.Mode == "solo")
         {
-            Rpc?.CheckReactionTimeout();
+            GameRpc?.CheckReactionTimeout();
             _aiAdapter?.Process(delta);
         }
     }
